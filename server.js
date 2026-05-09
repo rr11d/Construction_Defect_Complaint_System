@@ -35,8 +35,7 @@ const REPORT_STATUS = {
   RECEIVED: '접수',
   IN_REVIEW: '검토중',
   REPAIRING: '보수중',
-  COMPLETED: '처리완료',
-  REJECTED: '반려'
+  COMPLETED: '처리완료'
 };
 
 // 5. 공통 보조 함수

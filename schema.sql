@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS reports (
   analysis_json JSON NOT NULL,
   image_data LONGTEXT NULL,
   image_url VARCHAR(500) NULL,
-  status ENUM('접수', '검토중', '보수중', '처리완료', '반려') NOT NULL DEFAULT '접수',
+  status ENUM('접수', '검토중', '보수중', '처리완료') NOT NULL DEFAULT '접수',
   received_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   processed_at DATETIME NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS reports (
 CREATE TABLE IF NOT EXISTS report_status_history (
   id INT AUTO_INCREMENT PRIMARY KEY,
   report_id INT NOT NULL,
-  status ENUM('접수', '검토중', '보수중', '처리완료', '반려') NOT NULL,
+  status ENUM('접수', '검토중', '보수중', '처리완료') NOT NULL,
   changed_by INT NULL,
   note VARCHAR(255) NULL,
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
