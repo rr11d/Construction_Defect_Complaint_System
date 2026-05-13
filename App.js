@@ -1,53 +1,54 @@
 import React, { useEffect, useState } from 'react';
-import axios from 'axios';
+import api from './src/api/client.js';
+import AuthView from './src/components/AuthView.jsx';
+import AdminDashboard from './src/components/AdminDashboard.jsx';
+import UserDashboard from './src/components/UserDashboard.jsx';
+import Toast from './src/components/Toast.jsx';
+import { getStatusLabel } from './src/utils/status.js';
 
-const API_BASE_URL = 'http://localhost:3000';
-
-const STATUS_COLORS = {
-  '접수': '#f39c12',
-  '검토중': '#2980b9',
-  '보수중': '#8e44ad',
-  '처리완료': '#27ae60'
-};
-
-// 저장된 구조화 데이터만 있어도 카드 미리보기를 만들 수 있도록 변환
-function formatReportPreview(report) {
-  if (report.analysis_result) {
-    return report.analysis_result;
-  }
-
-  const analysis = report.analysis_json || {};
-  const repairMethods = Array.isArray(analysis.repairMethods)
-    ? analysis.repairMethods.join(', ')
-    : '';
-
-  return [
-    `하자 유형: ${report.defect_type || analysis.defectType || '미분류'}`,
-    `심각도: ${report.severity_score ?? analysis.severityScore ?? '미정'}`,
-    `예상 처리 기간: ${report.expected_processing_days ?? analysis.expectedProcessingDays ?? '미정'}일`,
-    repairMethods ? `권장 보수 방법: ${repairMethods}` : ''
-  ].filter(Boolean).join('\n');
+function makeToast(message, type = 'info') {
+  return { id: Date.now(), message, type };
 }
 
 function ConstructionChatbot() {
-  // --- 1. 상태 관리 ---
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [user, setUser] = useState(null);
   const [role, setRole] = useState(null);
   const [authView, setAuthView] = useState('login');
   const [authData, setAuthData] = useState({ userid: '', password: '', name: '' });
-  // 공통 상태
   const [loading, setLoading] = useState(false);
-  const [preview, setPreview] = useState(null);
   const [input, setInput] = useState('');
   const [messages, setMessages] = useState([]);
-  const [currentImageBase64, setCurrentImageBase64] = useState(null);
-  // 사용자용 상태
+  const [selectedImages, setSelectedImages] = useState([]);
+  const [imageStatus, setImageStatus] = useState('idle');
+  const [imageError, setImageError] = useState('');
   const [reports, setReports] = useState([]);
-  // 관리자용 상태
   const [allReports, setAllReports] = useState([]);
+  const [toast, setToast] = useState(null);
 
-  // 페이지 로드 시 로그인 확인
+  const showToast = (message, type = 'info') => {
+    setToast(makeToast(message, type));
+  };
+
+  const fetchMyReports = async (userId) => {
+    try {
+      const targetId = userId || user?.id;
+      const res = await api.get(`/api/my-reports/${targetId}`);
+      setReports(res.data);
+    } catch (error) {
+      showToast(error.response?.data?.error || '민원 목록을 불러오지 못했습니다.', 'error');
+    }
+  };
+
+  const fetchAllReports = async () => {
+    try {
+      const res = await api.get('/api/admin/all-reports');
+      setAllReports(res.data);
+    } catch (error) {
+      showToast(error.response?.data?.error || '관리자 목록을 불러오지 못했습니다.', 'error');
+    }
+  };
+
   useEffect(() => {
     const token = localStorage.getItem('token');
     const name = localStorage.getItem('userName');
@@ -57,7 +58,7 @@ function ConstructionChatbot() {
     if (!token) return;
 
     setIsLoggedIn(true);
-    setUser({ name, id });
+    setUser({ name, id: Number(id) });
     setRole(savedRole);
 
     if (savedRole === 'admin') {
@@ -67,49 +68,30 @@ function ConstructionChatbot() {
     }
   }, []);
 
-  // --- 2. 데이터 가져오기 API ---
+  useEffect(() => {
+    if (!toast) return undefined;
+    const timer = window.setTimeout(() => setToast(null), 2600);
+    return () => window.clearTimeout(timer);
+  }, [toast]);
 
-  // [사용자용] 내 민원 접수 내역 가져오기
-  const fetchMyReports = async (userId) => {
-    try {
-      const targetId = userId || user?.id;
-      const res = await axios.get(`${API_BASE_URL}/api/my-reports/${targetId}`);
-      setReports(res.data);
-    } catch (error) {
-      console.error('Failed to load reports', error);
-    }
-  };
-
-  // [관리자용] 전체 민원 접수 내역 가져오기
-  const fetchAllReports = async () => {
-    try {
-      const res = await axios.get(`${API_BASE_URL}/api/admin/all-reports`);
-      setAllReports(res.data);
-    } catch (error) {
-      console.error('Failed to load admin reports', error);
-    }
-  };
-
-  // [관리자용] 민원 처리 상태 업데이트
   const updateStatus = async (id, newStatus) => {
     try {
-      await axios.put(`${API_BASE_URL}/api/report-status/${id}`, { status: newStatus });
-      alert(`상태가 [${newStatus}]로 변경되었습니다.`);
+      await api.put(`/api/report-status/${id}`, { status: newStatus });
+      showToast(`상태가 [${getStatusLabel(newStatus)}]로 변경되었습니다.`, 'success');
       fetchAllReports();
     } catch (error) {
-      alert('상태 변경에 실패했습니다.');
+      showToast(error.response?.data?.error || '상태 변경에 실패했습니다.', 'error');
     }
   };
 
-  // --- 3. 인증 로직 (로그인/회원가입) ---
   const handleAuth = async () => {
     const url = authView === 'login' ? '/api/login' : '/api/signup';
 
     try {
-      const res = await axios.post(`${API_BASE_URL}${url}`, authData);
+      const res = await api.post(url, authData);
 
       if (authView === 'signup') {
-        alert('회원가입이 완료되었습니다. 로그인해주세요.');
+        showToast('회원가입이 완료되었습니다. 로그인해 주세요.', 'success');
         setAuthView('login');
         return;
       }
@@ -129,11 +111,17 @@ function ConstructionChatbot() {
         fetchMyReports(res.data.id);
       }
     } catch (error) {
-      alert(error.response?.data?.error || '오류가 발생했습니다.');
+      showToast(error.response?.data?.error || '오류가 발생했습니다.', 'error');
     }
   };
 
-  // 로그아웃 시 세션 및 화면 상태 초기화
+  const clearImages = () => {
+    selectedImages.forEach((image) => URL.revokeObjectURL(image.preview));
+    setSelectedImages([]);
+    setImageStatus('idle');
+    setImageError('');
+  };
+
   const handleLogout = () => {
     localStorage.clear();
     setIsLoggedIn(false);
@@ -142,54 +130,115 @@ function ConstructionChatbot() {
     setMessages([]);
     setReports([]);
     setAllReports([]);
-    setPreview(null);
-    setCurrentImageBase64(null);
+    clearImages();
   };
 
-  // --- 4. 사용자 전용 기능 (이미지 업로드/AI 분석/DB 저장) ---
-
-  // 이미지 업로드 후 미리보기와 base64 데이터 생성
-  const handleImageUpload = (event) => {
-    const file = event.target.files[0];
-    if (!file) return;
-
-    setPreview(URL.createObjectURL(file));
+  // 프론트에서는 미리보기와 AI 분석용 base64를 만들고, 저장은 최적화된 File 객체로 보낸다.
+  const prepareImageFile = (file) => new Promise((resolve, reject) => {
+    if (!file.type.startsWith('image/')) {
+      reject(new Error('이미지 파일만 선택할 수 있습니다.'));
+      return;
+    }
 
     const reader = new FileReader();
-    reader.readAsDataURL(file);
     reader.onload = (loadEvent) => {
       const img = new Image();
-      img.src = loadEvent.target.result;
       img.onload = () => {
         const canvas = document.createElement('canvas');
-        const maxWidth = 800;
-        const scaleSize = maxWidth / img.width;
-        canvas.width = maxWidth;
-        canvas.height = img.height * scaleSize;
+        const maxSide = 1280;
+        const scaleSize = Math.min(1, maxSide / Math.max(img.width, img.height));
+        canvas.width = Math.round(img.width * scaleSize);
+        canvas.height = Math.round(img.height * scaleSize);
 
         const ctx = canvas.getContext('2d');
         ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-        setCurrentImageBase64(canvas.toDataURL('image/jpeg', 0.7));
+        const base64 = canvas.toDataURL('image/jpeg', 0.72);
+
+        canvas.toBlob((blob) => {
+          if (!blob) {
+            reject(new Error('이미지를 변환하지 못했습니다.'));
+            return;
+          }
+
+          const normalizedName = file.name.replace(/\.[^.]+$/, '') || 'defect-photo';
+          const optimizedFile = new File([blob], `${normalizedName}.jpg`, { type: 'image/jpeg' });
+
+          resolve({
+            id: crypto.randomUUID(),
+            name: file.name,
+            preview: URL.createObjectURL(optimizedFile),
+            base64,
+            file: optimizedFile,
+            width: canvas.width,
+            height: canvas.height
+          });
+        }, 'image/jpeg', 0.82);
       };
+      img.onerror = () => reject(new Error('이미지를 불러오지 못했습니다.'));
+      img.src = loadEvent.target.result;
     };
+    reader.onerror = () => reject(new Error('이미지 파일을 읽지 못했습니다.'));
+    reader.readAsDataURL(file);
+  });
+
+  const handleImageFiles = async (files) => {
+    const imageFiles = files.filter(Boolean);
+    if (imageFiles.length === 0) return;
+
+    setImageStatus('processing');
+    setImageError('');
+
+    try {
+      const prepared = await Promise.all(imageFiles.map(prepareImageFile));
+      setSelectedImages((prev) => {
+        const next = [...prev, ...prepared].slice(0, 10);
+        if (next.length < prev.length + prepared.length) {
+          showToast('이미지는 최대 10장까지 등록할 수 있습니다.', 'info');
+        }
+        return next;
+      });
+      setImageStatus('ready');
+    } catch (error) {
+      setImageStatus('error');
+      setImageError(error.message);
+      showToast(error.message, 'error');
+    }
   };
 
-  // AI 채팅 요청
-  // [개선] 화면용 텍스트와 구조화된 JSON 응답을 함께 보관
+  const handleImageUpload = (event) => {
+    const files = Array.from(event.target.files || []);
+    event.target.value = '';
+    handleImageFiles(files);
+  };
+
+  const removeImage = (imageId) => {
+    setSelectedImages((prev) => {
+      const target = prev.find((image) => image.id === imageId);
+      if (target) URL.revokeObjectURL(target.preview);
+      const next = prev.filter((image) => image.id !== imageId);
+      setImageStatus(next.length > 0 ? 'ready' : 'idle');
+      return next;
+    });
+  };
+
   const sendMessage = async () => {
-    if (!input && !currentImageBase64) return;
+    if (!input && selectedImages.length === 0) return;
+    if (imageStatus === 'processing') {
+      showToast('이미지를 준비하는 중입니다. 잠시 후 다시 시도해 주세요.', 'info');
+      return;
+    }
 
     setLoading(true);
-    const userMessage = { role: 'user', content: input || '사진을 분석해주세요.' };
+    const userMessage = { role: 'user', content: input || '사진을 분석해 주세요.' };
     const updatedMessages = [...messages, userMessage];
 
     setMessages(updatedMessages);
     setInput('');
 
     try {
-      const res = await axios.post(`${API_BASE_URL}/api/chat`, {
+      const res = await api.post('/api/chat', {
         messages: updatedMessages,
-        image: currentImageBase64
+        image: selectedImages[0]?.base64
       });
 
       setMessages((prev) => [
@@ -201,261 +250,85 @@ function ConstructionChatbot() {
         }
       ]);
     } catch (error) {
-      alert('분석 중 오류가 발생했습니다.');
+      showToast(error.response?.data?.error || '분석 중 오류가 발생했습니다.', 'error');
     } finally {
       setLoading(false);
     }
   };
 
-  // [개선] 기존 분석 텍스트와 함께 구조화된 분석 결과도 DB로 저장
+  // 민원 접수는 multipart/form-data로 여러 이미지를 전송해 서버 저장 구조와 맞춘다.
   const saveToDB = async (assistantMessage) => {
     const structured = assistantMessage.structuredResult || {};
 
-    try {
-      await axios.post(`${API_BASE_URL}/api/register-report`, {
-        user_id: user.id,
-        analysis_result: assistantMessage.content,
-        analysis_text: assistantMessage.content,
-        structured_analysis: structured,
-        defect_type: structured.defectType,
-        severity_score: structured.severityScore,
-        estimated_repair_cost: structured.estimatedRepairCost,
-        expected_processing_days: structured.expectedProcessingDays,
-        actual_processing_days: structured.actualProcessingDays,
-        image_data: currentImageBase64
-      });
+    if (selectedImages.length === 0) {
+      showToast('민원 접수를 위해 하자 사진을 선택해 주세요.', 'error');
+      return;
+    }
 
-      alert('민원이 정상적으로 접수되었습니다.');
+    const formData = new FormData();
+    formData.append('user_id', user.id);
+    formData.append('analysis_result', assistantMessage.content);
+    formData.append('analysis_text', assistantMessage.content);
+    formData.append('structured_analysis', JSON.stringify(structured));
+    selectedImages.forEach((image) => {
+      formData.append('images', image.file);
+    });
+
+    try {
+      await api.post('/api/register-report', formData);
+      showToast('민원이 정상적으로 접수되었습니다.', 'success');
       fetchMyReports();
     } catch (error) {
-      alert('DB 저장에 실패했습니다.');
+      showToast(error.response?.data?.error || '민원 접수에 실패했습니다.', 'error');
     }
   };
 
-  // --- 5. UI 분기 조건문 ---
-
-  // [1] 로그인/회원가입 화면
   if (!isLoggedIn) {
     return (
-      <div style={{ padding: '50px', maxWidth: '400px', margin: 'auto' }}>
-        <h2>{authView === 'login' ? '로그인' : '회원가입'}</h2>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-          {authView === 'signup' && (
-            <input
-              placeholder="이름"
-              onChange={(event) => setAuthData({ ...authData, name: event.target.value })}
-            />
-          )}
-          <input
-            placeholder="아이디"
-            onChange={(event) => setAuthData({ ...authData, userid: event.target.value })}
-          />
-          <input
-            type="password"
-            placeholder="비밀번호"
-            onChange={(event) => setAuthData({ ...authData, password: event.target.value })}
-          />
-          <button onClick={handleAuth}>
-            {authView === 'login' ? '로그인' : '가입하기'}
-          </button>
-          <p
-            onClick={() => setAuthView(authView === 'login' ? 'signup' : 'login')}
-            style={{ cursor: 'pointer', textAlign: 'center', color: 'blue' }}
-          >
-            {authView === 'login'
-              ? '계정이 없으신가요? 회원가입'
-              : '이미 계정이 있나요? 로그인'}
-          </p>
-        </div>
-      </div>
+      <>
+        <AuthView
+          authView={authView}
+          authData={authData}
+          setAuthView={setAuthView}
+          setAuthData={setAuthData}
+          onSubmit={handleAuth}
+        />
+        <Toast toast={toast} onClose={() => setToast(null)} />
+      </>
     );
   }
 
-  // [2] 관리자 화면
   if (role === 'admin') {
     return (
-      <div style={{ padding: '20px', maxWidth: '1000px', margin: 'auto' }}>
-        <header
-          style={{
-            display: 'flex',
-            justifyContent: 'space-between',
-            borderBottom: '2px solid red',
-            paddingBottom: '10px'
-          }}
-        >
-          <h2>관리자 대시보드</h2>
-          <button onClick={handleLogout}>로그아웃</button>
-        </header>
-        <p>접수된 건설 하자 민원의 처리 현황을 관리합니다.</p>
-
-        <table border="1" style={{ width: '100%', borderCollapse: 'collapse', marginTop: '20px' }}>
-          <thead style={{ backgroundColor: '#f4f4f4' }}>
-            <tr>
-              <th>번호</th>
-              <th>작성자</th>
-              <th>사진</th>
-              <th>하자 유형</th>
-              <th>분석 요약</th>
-              <th>상태</th>
-              <th>작업</th>
-            </tr>
-          </thead>
-          <tbody>
-            {allReports.map((report) => (
-              <tr key={report.id} style={{ textAlign: 'center' }}>
-                <td>{report.id}</td>
-                <td>{report.user_name}</td>
-                <td>
-                  <img src={report.image_data || report.image_url} width="60" alt="하자" />
-                </td>
-                <td>{report.defect_type || report.analysis_json?.defectType || '미분류'}</td>
-                <td style={{ fontSize: '12px', textAlign: 'left', padding: '5px' }}>
-                  {formatReportPreview(report).substring(0, 80)}...
-                </td>
-                <td style={{ fontWeight: 'bold', color: STATUS_COLORS[report.status] || '#f39c12' }}>
-                  {report.status}
-                </td>
-                <td>
-                  <button onClick={() => updateStatus(report.id, '보수중')}>보수중</button>
-                  <button onClick={() => updateStatus(report.id, '처리완료')}>완료</button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      <>
+        <AdminDashboard allReports={allReports} onLogout={handleLogout} onUpdateStatus={updateStatus} />
+        <Toast toast={toast} onClose={() => setToast(null)} />
+      </>
     );
   }
 
-  // [3] 일반 사용자 화면
   return (
-    <div style={{ padding: '20px', maxWidth: '800px', margin: 'auto', fontFamily: 'sans-serif' }}>
-      <header
-        style={{
-          display: 'flex',
-          justifyContent: 'space-between',
-          alignItems: 'center',
-          borderBottom: '1px solid #ddd',
-          marginBottom: '20px'
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
-          <img src="/logo.png" alt="Logo" style={{ height: '80px' }} />
-          <h2 style={{ margin: 0 }}>{user.name}님의 건설 하자 진단 챗봇</h2>
-        </div>
-        <button onClick={handleLogout}>로그아웃</button>
-      </header>
-
-      <div
-        style={{
-          height: '400px',
-          overflowY: 'auto',
-          border: '1px solid #eee',
-          padding: '10px',
-          marginBottom: '20px',
-          borderRadius: '10px'
-        }}
-      >
-        {messages.map((msg, index) => (
-          <div key={index} style={{ textAlign: msg.role === 'user' ? 'right' : 'left', margin: '10px 0' }}>
-            <div
-              style={{
-                display: 'inline-block',
-                padding: '10px',
-                borderRadius: '10px',
-                backgroundColor: msg.role === 'user' ? '#007bff' : '#f1f1f1',
-                color: msg.role === 'user' ? '#fff' : '#000',
-                maxWidth: '80%',
-                whiteSpace: 'pre-wrap'
-              }}
-            >
-              {msg.content}
-              {msg.role === 'assistant' && (
-                <button
-                  onClick={() => saveToDB(msg)}
-                  style={{ display: 'block', marginTop: '10px', fontSize: '12px', cursor: 'pointer' }}
-                >
-                  민원 접수
-                </button>
-              )}
-            </div>
-          </div>
-        ))}
-        {loading && <p>AI가 분석 중입니다...</p>}
-      </div>
-
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '40px' }}>
-        <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
-          <input type="file" onChange={handleImageUpload} accept="image/*" />
-          {preview && (
-            <img
-              src={preview}
-              alt="preview"
-              style={{ width: '50px', height: '50px', objectFit: 'cover', borderRadius: '5px' }}
-            />
-          )}
-        </div>
-        <div style={{ display: 'flex', gap: '5px' }}>
-          <input
-            style={{ flex: 1, padding: '10px' }}
-            value={input}
-            onChange={(event) => setInput(event.target.value)}
-            placeholder="질문을 입력하세요."
-            onKeyPress={(event) => event.key === 'Enter' && sendMessage()}
-          />
-          <button onClick={sendMessage} disabled={loading} style={{ padding: '0 20px' }}>
-            전송
-          </button>
-        </div>
-      </div>
-
-      <div style={{ borderTop: '2px solid #333', paddingTop: '20px' }}>
-        <h3>나의 하자 접수 내역 ({reports.length}건)</h3>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: '15px', marginTop: '15px' }}>
-          {reports.length === 0 ? (
-            <p style={{ color: '#888' }}>아직 접수된 내역이 없습니다.</p>
-          ) : (
-            reports.map((report) => (
-              <div
-                key={report.id}
-                style={{
-                  display: 'flex',
-                  gap: '15px',
-                  padding: '15px',
-                  border: '1px solid #ddd',
-                  borderRadius: '10px',
-                  backgroundColor: '#f9f9f9'
-                }}
-              >
-                <img
-                  src={report.image_data || report.image_url}
-                  alt="하자"
-                  style={{ width: '100px', height: '100px', objectFit: 'cover', borderRadius: '5px' }}
-                />
-                <div style={{ flex: 1 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: '#666' }}>
-                    <span>접수 번호: #{report.id}</span>
-                    <span>{new Date(report.created_at).toLocaleString()}</span>
-                  </div>
-                  <div
-                    style={{
-                      fontWeight: 'bold',
-                      margin: '5px 0',
-                      color: STATUS_COLORS[report.status] || '#f39c12'
-                    }}
-                  >
-                    상태: {report.status}
-                  </div>
-                  <div style={{ fontSize: '13px', color: '#333', whiteSpace: 'pre-wrap' }}>
-                    {formatReportPreview(report)}
-                  </div>
-                </div>
-              </div>
-            ))
-          )}
-        </div>
-      </div>
-    </div>
+    <>
+      <UserDashboard
+        user={user}
+        messages={messages}
+        reports={reports}
+        loading={loading}
+        selectedImages={selectedImages}
+        imageStatus={imageStatus}
+        imageError={imageError}
+        input={input}
+        setInput={setInput}
+        onLogout={handleLogout}
+        onImageUpload={handleImageUpload}
+        onImageDrop={handleImageFiles}
+        onRemoveImage={removeImage}
+        onClearImages={clearImages}
+        onSendMessage={sendMessage}
+        onSaveReport={saveToDB}
+      />
+      <Toast toast={toast} onClose={() => setToast(null)} />
+    </>
   );
 }
 

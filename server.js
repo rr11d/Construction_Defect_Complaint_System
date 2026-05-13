@@ -4,6 +4,11 @@ const cors = require('cors');
 const mysql = require('mysql2');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
+const multer = require('multer');
+const sharp = require('sharp');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
 require('dotenv').config();
 
 const app = express();
@@ -13,6 +18,11 @@ const SECRET_KEY = process.env.SECRET_KEY;
 // 1. 미들웨어 설정
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
+
+const UPLOAD_ROOT = path.join(__dirname, 'uploads');
+const REPORT_UPLOAD_DIR = path.join(UPLOAD_ROOT, 'reports');
+fs.mkdirSync(REPORT_UPLOAD_DIR, { recursive: true });
+app.use('/uploads', express.static(UPLOAD_ROOT));
 
 // 2. MySQL 연결 설정
 const db = mysql.createPool({
@@ -27,16 +37,112 @@ const db = mysql.createPool({
 
 // 3. OpenAI 설정
 const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
+  apiKey: process.env.OPENAI_API_KEY,
+  baseURL: process.env.OPENAI_BASE_URL || undefined
 });
+
+const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o';
 
 // 4. 공통 상태값 설정
 const REPORT_STATUS = {
-  RECEIVED: '접수',
+  RECEIVED: '접수대기',
   IN_REVIEW: '검토중',
   REPAIRING: '보수중',
   COMPLETED: '처리완료'
 };
+const ALLOWED_REPORT_STATUSES = Object.values(REPORT_STATUS);
+
+// 이미지는 메모리로 받은 뒤 sharp에서 검증/변환하고, DB에는 파일 경로만 저장한다.
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 10 * 1024 * 1024
+  },
+  fileFilter: (req, file, callback) => {
+    if (!file.mimetype.startsWith('image/')) {
+      return callback(new Error('이미지 파일만 업로드할 수 있습니다.'));
+    }
+
+    return callback(null, true);
+  }
+});
+
+// 로그인 이후 API는 JWT 토큰을 확인해서 사용자/관리자 권한을 구분한다.
+function authenticateToken(req, res, next) {
+  const authHeader = req.headers.authorization || '';
+  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+
+  if (!token) {
+    return res.status(401).json({ error: '로그인이 필요합니다.' });
+  }
+
+  try {
+    req.user = jwt.verify(token, SECRET_KEY);
+    return next();
+  } catch (error) {
+    return res.status(401).json({ error: '유효하지 않은 로그인입니다.' });
+  }
+}
+
+function requireAdmin(req, res, next) {
+  if (req.user?.role !== 'admin') {
+    return res.status(403).json({ error: '관리자 권한이 필요합니다.' });
+  }
+
+  return next();
+}
+
+function requireSelfOrAdmin(req, res, next) {
+  const targetUserId = Number(req.params.user_id || req.body.user_id);
+
+  if (req.user?.role === 'admin' || req.user?.id === targetUserId) {
+    return next();
+  }
+
+  return res.status(403).json({ error: '본인 민원만 접근할 수 있습니다.' });
+}
+
+function isBlank(value) {
+  return value === undefined || value === null || String(value).trim() === '';
+}
+
+function validateRequiredFields(fields) {
+  const missing = Object.entries(fields)
+    .filter(([, value]) => isBlank(value))
+    .map(([key]) => key);
+
+  return missing;
+}
+
+function parseStructuredAnalysis(value) {
+  if (typeof value === 'string') {
+    return safeJsonParse(value);
+  }
+
+  return value;
+}
+
+// AI 분석 결과는 최종 화면/DB에서 쓰는 5개 필드가 모두 있어야 저장한다.
+function validateAnalysisPayload(payload) {
+  const missing = validateRequiredFields({
+    defectContent: payload.defectContent,
+    severityScore: payload.severityScore,
+    expectedSolution: payload.expectedSolution,
+    processingMethod: payload.processingMethod,
+    relatedLaws: payload.relatedLaws
+  });
+
+  if (missing.length > 0) {
+    return `AI 분석 결과 필드가 누락되었습니다: ${missing.join(', ')}`;
+  }
+
+  const severityScore = parseInteger(payload.severityScore);
+  if (severityScore === null || severityScore < 1 || severityScore > 10) {
+    return '심각도는 1~10 사이의 숫자여야 합니다.';
+  }
+
+  return null;
+}
 
 // 5. 공통 보조 함수
 
@@ -74,39 +180,65 @@ function safeJsonParse(value) {
   }
 }
 
+// 업로드 이미지는 회전 보정 후 WebP로 저장해 조회 성능과 저장 용량을 관리한다.
+async function processReportImage(file) {
+  if (!file) {
+    return null;
+  }
+
+  const filename = `${Date.now()}-${crypto.randomUUID()}.webp`;
+  const outputPath = path.join(REPORT_UPLOAD_DIR, filename);
+
+  const image = sharp(file.buffer, { failOn: 'none' })
+    .rotate()
+    .resize({
+      width: 1600,
+      height: 1600,
+      fit: 'inside',
+      withoutEnlargement: true
+    })
+    .webp({ quality: 82 });
+
+  const info = await image.toFile(outputPath);
+
+  return {
+    imageUrl: `/uploads/reports/${filename}`,
+    imagePath: path.relative(__dirname, outputPath).replace(/\\/g, '/'),
+    mimeType: 'image/webp',
+    size: info.size,
+    width: info.width,
+    height: info.height
+  };
+}
+
 // 구조화된 분석 결과를 기존 화면용 텍스트로 변환
 function buildAnalysisText(analysis) {
-  const repairMethods = normalizeArray(analysis.repairMethods).join(', ') || '정보 없음';
-  const relatedLaws = normalizeArray(analysis.relatedLaws).join(', ') || '정보 없음';
-  const estimatedCost = analysis.estimatedRepairCost !== null && analysis.estimatedRepairCost !== undefined
-    ? `${analysis.estimatedRepairCost.toLocaleString('ko-KR')}원`
-    : '미정';
-  const expectedDays = analysis.expectedProcessingDays !== null && analysis.expectedProcessingDays !== undefined
-    ? `${analysis.expectedProcessingDays}일`
-    : '미정';
+  const relatedLaws = Array.isArray(analysis.relatedLaws)
+    ? analysis.relatedLaws.join(', ')
+    : analysis.relatedLaws || '정보 없음';
 
   return [
-    `하자 유형: ${analysis.defectType || '미분류'}`,
+    `하자 내용: ${analysis.defectContent || '미분류'}`,
     `심각도: ${analysis.severityScore ?? '미정'}`,
-    `예상 보수 비용: ${estimatedCost}`,
-    `예상 처리 기간: ${expectedDays}`,
-    `권장 보수 방법: ${repairMethods}`,
-    `관련 법규: ${relatedLaws}`,
-    `상세 설명: ${analysis.summary || '설명 없음'}`
+    `예상 해결 방법: ${analysis.expectedSolution || '정보 없음'}`,
+    `처리 방법: ${analysis.processingMethod || '정보 없음'}`,
+    `관련 법규: ${relatedLaws}`
   ].join('\n');
 }
 
 // AI 응답 JSON을 DB 저장용 형식으로 정규화
 function normalizeAnalysisPayload(payload = {}) {
+  const repairMethods = normalizeArray(payload.repairMethods).join(', ');
+  const relatedLaws = Array.isArray(payload.relatedLaws)
+    ? payload.relatedLaws.filter(Boolean).join(', ')
+    : payload.relatedLaws;
+
   const normalized = {
-    defectType: payload.defectType || '미분류',
-    severityScore: Math.min(Math.max(parseInteger(payload.severityScore) ?? 0, 0), 10),
-    estimatedRepairCost: parseCurrency(payload.estimatedRepairCost),
-    expectedProcessingDays: parseInteger(payload.expectedProcessingDays),
-    actualProcessingDays: parseInteger(payload.actualProcessingDays),
-    repairMethods: normalizeArray(payload.repairMethods),
-    relatedLaws: normalizeArray(payload.relatedLaws),
-    summary: payload.summary || ''
+    defectContent: payload.defectContent || payload.defectType || payload.summary || '미분류',
+    severityScore: Math.min(Math.max(parseInteger(payload.severityScore) ?? 1, 1), 10),
+    expectedSolution: payload.expectedSolution || repairMethods || payload.summary || '전문가 현장 확인 후 보수 계획 수립',
+    processingMethod: payload.processingMethod || payload.expectedProcessingMethod || '관리자 검토 후 보수 일정 조율',
+    relatedLaws: relatedLaws || '관련 법규 확인 필요'
   };
 
   return normalized;
@@ -133,6 +265,19 @@ function extractAssistantJson(content) {
 // reports 조회 결과를 프론트 응답 형식으로 변환
 function formatReportRow(row) {
   const analysisJson = safeJsonParse(row.analysis_json);
+  const parsedImages = safeJsonParse(row.images_json);
+  const images = Array.isArray(parsedImages)
+    ? parsedImages.filter(Boolean)
+    : [];
+
+  if (images.length === 0 && (row.image_url || row.image_data)) {
+    images.push({
+      image_url: row.image_url,
+      image_path: row.image_path,
+      image_mime_type: row.image_mime_type,
+      image_size: row.image_size
+    });
+  }
 
   return {
     id: row.id,
@@ -147,6 +292,10 @@ function formatReportRow(row) {
     analysis_json: analysisJson,
     image_data: row.image_data,
     image_url: row.image_url,
+    image_path: row.image_path,
+    image_mime_type: row.image_mime_type,
+    image_size: row.image_size,
+    images,
     status: row.status,
     received_at: row.received_at,
     processed_at: row.processed_at,
@@ -160,6 +309,11 @@ function formatReportRow(row) {
 // [기능 1] 회원가입 API (기본 role은 'user')
 app.post('/api/signup', async (req, res) => {
   const { userid, password, name } = req.body;
+  const missing = validateRequiredFields({ userid, password, name });
+
+  if (missing.length > 0) {
+    return res.status(400).json({ error: '아이디, 비밀번호, 이름을 모두 입력해 주세요.' });
+  }
 
   try {
     const hashedPassword = await bcrypt.hash(password, 10);
@@ -180,6 +334,12 @@ app.post('/api/signup', async (req, res) => {
 // [기능 2] 로그인 API (role 정보 포함)
 app.post('/api/login', (req, res) => {
   const { userid, password } = req.body;
+  const missing = validateRequiredFields({ userid, password });
+
+  if (missing.length > 0) {
+    return res.status(400).json({ error: '아이디와 비밀번호를 입력해 주세요.' });
+  }
+
   const query = 'SELECT * FROM users WHERE userid = ?';
 
   db.execute(query, [userid], async (err, results) => {
@@ -212,7 +372,7 @@ app.post('/api/login', (req, res) => {
 
 // [기능 3] AI 채팅 API
 // [개선] 자유 텍스트 대신 JSON 구조 응답을 받고, 화면용 텍스트도 함께 생성
-app.post('/api/chat', async (req, res) => {
+app.post('/api/chat', authenticateToken, async (req, res) => {
   try {
     const { messages = [], image } = req.body;
 
@@ -221,16 +381,13 @@ app.post('/api/chat', async (req, res) => {
       '반드시 하나의 JSON 객체만 응답하세요. 설명 문장, 코드블록, 마크다운은 금지입니다.',
       'JSON 형식은 아래 키를 정확히 사용하세요.',
       '{',
-      '  "defectType": "string",',
+      '  "defectContent": "string",',
       '  "severityScore": 1,',
-      '  "estimatedRepairCost": 0,',
-      '  "expectedProcessingDays": 0,',
-      '  "actualProcessingDays": null,',
-      '  "repairMethods": ["string", "string"],',
-      '  "relatedLaws": ["string"],',
-      '  "summary": "string"',
+      '  "expectedSolution": "string",',
+      '  "processingMethod": "string",',
+      '  "relatedLaws": "string"',
       '}',
-      'severityScore는 1~10 정수, 금액과 일수는 숫자로 반환하세요.',
+      'severityScore는 1~10 정수로 반환하세요.',
       '이미지와 질문을 함께 보고 가장 가능성 높은 값을 채우세요.'
     ].join('\n');
 
@@ -249,7 +406,7 @@ app.post('/api/chat', async (req, res) => {
     }
 
     const completion = await openai.chat.completions.create({
-      model: 'gpt-4o',
+      model: OPENAI_MODEL,
       response_format: { type: 'json_object' },
       messages: apiMessages,
       max_tokens: 1000
@@ -271,88 +428,144 @@ app.post('/api/chat', async (req, res) => {
 });
 
 // [기능 4] 하자 민원 접수 데이터 저장 API
-// [개선] 분석 결과를 컬럼별 데이터 + analysis_json으로 함께 저장
-app.post('/api/register-report', (req, res) => {
+// [개선] 분석 결과는 컬럼별로 저장하고, 이미지는 파일로 저장한 뒤 경로만 DB에 보관
+// 민원 접수는 분석 JSON과 여러 장의 사진을 함께 받아 reports/report_images에 나눠 저장한다.
+app.post('/api/register-report', authenticateToken, upload.array('images', 10), requireSelfOrAdmin, async (req, res) => {
   const {
     user_id,
-    image_data,
-    image_url = null,
     analysis_result,
     analysis_text,
     structured_analysis,
-    defect_type,
-    severity_score,
-    estimated_repair_cost,
-    expected_processing_days,
-    actual_processing_days
   } = req.body;
 
-  const normalizedStructured = normalizeAnalysisPayload(
-    structured_analysis || {
-      defectType: defect_type,
-      severityScore: severity_score,
-      estimatedRepairCost: estimated_repair_cost,
-      expectedProcessingDays: expected_processing_days,
-      actualProcessingDays: actual_processing_days,
-      summary: analysis_text || analysis_result || ''
-    }
-  );
+  const imageFiles = req.files || [];
+  if (imageFiles.length === 0) {
+    return res.status(400).json({ error: '민원 접수를 위한 하자 사진이 필요합니다.' });
+  }
+
+  const parsedStructuredAnalysis = parseStructuredAnalysis(structured_analysis);
+  if (!parsedStructuredAnalysis) {
+    return res.status(400).json({ error: 'AI 분석 결과 JSON이 필요합니다.' });
+  }
+
+  const normalizedStructured = normalizeAnalysisPayload(parsedStructuredAnalysis);
+  const analysisError = validateAnalysisPayload(normalizedStructured);
+  if (analysisError) {
+    return res.status(400).json({ error: analysisError });
+  }
 
   const finalAnalysisText = analysis_text || analysis_result || buildAnalysisText(normalizedStructured);
 
-  const query = `
-    INSERT INTO reports (
-      user_id,
-      defect_type,
-      severity_score,
-      estimated_repair_cost,
-      expected_processing_days,
-      actual_processing_days,
-      analysis_text,
-      analysis_json,
-      image_data,
-      image_url,
-      status
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `;
+  const reportUserId = req.user.role === 'admin' ? Number(user_id) : req.user.id;
 
-  const params = [
-    user_id,
-    normalizedStructured.defectType,
-    normalizedStructured.severityScore,
-    normalizedStructured.estimatedRepairCost,
-    normalizedStructured.expectedProcessingDays,
-    normalizedStructured.actualProcessingDays,
-    finalAnalysisText,
-    JSON.stringify(normalizedStructured),
-    image_data || null,
-    image_url,
-    REPORT_STATUS.RECEIVED
-  ];
+  if (!Number.isInteger(reportUserId)) {
+    return res.status(400).json({ error: '유효한 사용자 정보가 필요합니다.' });
+  }
 
-  db.execute(query, params, (err, result) => {
-    if (err) {
-      return res.status(500).json({ error: 'DB 저장 실패', detail: err.message });
-    }
+  let storedImages = [];
 
-    const historyQuery = `
-      INSERT INTO report_status_history (report_id, status, changed_by, note)
-      VALUES (?, ?, ?, ?)
+  try {
+    storedImages = await Promise.all(imageFiles.map((file) => processReportImage(file)));
+    const primaryImage = storedImages[0];
+
+    const query = `
+      INSERT INTO reports (
+        user_id,
+        defect_type,
+        severity_score,
+        estimated_repair_cost,
+        expected_processing_days,
+        actual_processing_days,
+        analysis_text,
+        analysis_json,
+        image_url,
+        image_path,
+        image_mime_type,
+        image_size,
+        status
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
 
-    db.execute(
-      historyQuery,
-      [result.insertId, REPORT_STATUS.RECEIVED, user_id, '신고 최초 접수'],
-      () => {
-        res.json({ success: true, reportId: result.insertId });
+    const params = [
+      reportUserId,
+      normalizedStructured.defectContent,
+      normalizedStructured.severityScore,
+      null,
+      null,
+      null,
+      finalAnalysisText,
+      JSON.stringify(normalizedStructured),
+      primaryImage.imageUrl,
+      primaryImage.imagePath,
+      primaryImage.mimeType,
+      primaryImage.size,
+      REPORT_STATUS.RECEIVED
+    ];
+
+    db.execute(query, params, (err, result) => {
+      if (err) {
+        storedImages.forEach((image) => fs.promises.unlink(path.join(__dirname, image.imagePath)).catch(() => {}));
+        return res.status(500).json({ error: 'DB 저장 실패', detail: err.message });
       }
-    );
-  });
+
+      const historyQuery = `
+        INSERT INTO report_status_history (report_id, status, changed_by, note)
+        VALUES (?, ?, ?, ?)
+      `;
+
+      const imageRows = storedImages.map((image, index) => [
+        result.insertId,
+        image.imageUrl,
+        image.imagePath,
+        image.mimeType,
+        image.size,
+        image.width,
+        image.height,
+        index
+      ]);
+
+      const imageQuery = `
+        INSERT INTO report_images (
+          report_id,
+          image_url,
+          image_path,
+          image_mime_type,
+          image_size,
+          width,
+          height,
+          sort_order
+        ) VALUES ?
+      `;
+
+      db.query(imageQuery, [imageRows], (imageErr) => {
+        if (imageErr) {
+          storedImages.forEach((image) => fs.promises.unlink(path.join(__dirname, image.imagePath)).catch(() => {}));
+          return res.status(500).json({ error: '이미지 정보 저장 실패', detail: imageErr.message });
+        }
+
+        db.execute(historyQuery, [result.insertId, REPORT_STATUS.RECEIVED, reportUserId, '신고 최초 접수'], (historyErr) => {
+          if (historyErr) {
+            return res.status(500).json({ error: '상태 이력 저장 실패', detail: historyErr.message });
+          }
+
+          res.json({
+            success: true,
+            reportId: result.insertId,
+            image_url: primaryImage.imageUrl,
+            images: storedImages.map((image) => ({ image_url: image.imageUrl }))
+          });
+        });
+      });
+    });
+  } catch (error) {
+    storedImages.forEach((image) => fs.promises.unlink(path.join(__dirname, image.imagePath)).catch(() => {}));
+    res.status(500).json({ error: '이미지 저장 실패', detail: error.message });
+  }
 });
 
 // [기능 5] 내 민원 접수 내역 조회 API
 // [개선] 구조화된 분석 컬럼과 JSON 데이터를 함께 조회
-app.get('/api/my-reports/:user_id', (req, res) => {
+app.get('/api/my-reports/:user_id', authenticateToken, requireSelfOrAdmin, (req, res) => {
   const userId = req.params.user_id;
   const query = `
     SELECT
@@ -367,6 +580,25 @@ app.get('/api/my-reports/:user_id', (req, res) => {
       analysis_json,
       image_data,
       image_url,
+      image_path,
+      image_mime_type,
+      image_size,
+      (
+        SELECT JSON_ARRAYAGG(
+          JSON_OBJECT(
+            'id', ri.id,
+            'image_url', ri.image_url,
+            'image_path', ri.image_path,
+            'image_mime_type', ri.image_mime_type,
+            'image_size', ri.image_size,
+            'width', ri.width,
+            'height', ri.height,
+            'sort_order', ri.sort_order
+          )
+        )
+        FROM report_images ri
+        WHERE ri.report_id = reports.id
+      ) AS images_json,
       status,
       received_at,
       processed_at,
@@ -387,7 +619,7 @@ app.get('/api/my-reports/:user_id', (req, res) => {
 });
 
 // [기능 6] 관리자 전체 민원 내역 조회 API
-app.get('/api/admin/all-reports', (req, res) => {
+app.get('/api/admin/all-reports', authenticateToken, requireAdmin, (req, res) => {
   const query = `
     SELECT
       r.id,
@@ -401,6 +633,25 @@ app.get('/api/admin/all-reports', (req, res) => {
       r.analysis_json,
       r.image_data,
       r.image_url,
+      r.image_path,
+      r.image_mime_type,
+      r.image_size,
+      (
+        SELECT JSON_ARRAYAGG(
+          JSON_OBJECT(
+            'id', ri.id,
+            'image_url', ri.image_url,
+            'image_path', ri.image_path,
+            'image_mime_type', ri.image_mime_type,
+            'image_size', ri.image_size,
+            'width', ri.width,
+            'height', ri.height,
+            'sort_order', ri.sort_order
+          )
+        )
+        FROM report_images ri
+        WHERE ri.report_id = r.id
+      ) AS images_json,
       r.status,
       r.received_at,
       r.processed_at,
@@ -423,11 +674,18 @@ app.get('/api/admin/all-reports', (req, res) => {
 
 // [기능 7] 관리자 하자 처리 상태 업데이트 API
 // [개선] 처리 완료 시 처리일자/실제 처리기간을 함께 갱신하고 이력도 저장
-app.put('/api/report-status/:id', (req, res) => {
+app.put('/api/report-status/:id', authenticateToken, requireAdmin, (req, res) => {
   const reportId = req.params.id;
-  const { status, changed_by = null, note = null } = req.body;
+  const { status, changed_by = req.user.id, note = null } = req.body;
 
   const normalizedStatus = status || REPORT_STATUS.IN_REVIEW;
+  if (!ALLOWED_REPORT_STATUSES.includes(normalizedStatus)) {
+    return res.status(400).json({
+      error: '허용되지 않는 상태값입니다.',
+      allowedStatuses: ALLOWED_REPORT_STATUSES
+    });
+  }
+
   const isCompleted = normalizedStatus === REPORT_STATUS.COMPLETED;
 
   const query = `
@@ -442,9 +700,13 @@ app.put('/api/report-status/:id', (req, res) => {
     WHERE id = ?
   `;
 
-  db.execute(query, [normalizedStatus, isCompleted, isCompleted, reportId], (err) => {
+  db.execute(query, [normalizedStatus, isCompleted, isCompleted, reportId], (err, result) => {
     if (err) {
-      return res.status(500).json({ error: '상태 업데이트 실패' });
+      return res.status(500).json({ error: '상태 업데이트 실패', detail: err.message });
+    }
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: '해당 민원을 찾을 수 없습니다.' });
     }
 
     const historyQuery = `
@@ -452,10 +714,29 @@ app.put('/api/report-status/:id', (req, res) => {
       VALUES (?, ?, ?, ?)
     `;
 
-    db.execute(historyQuery, [reportId, normalizedStatus, changed_by, note], () => {
+    db.execute(historyQuery, [reportId, normalizedStatus, changed_by, note], (historyErr) => {
+      if (historyErr) {
+        return res.status(500).json({ error: '상태 이력 저장 실패', detail: historyErr.message });
+      }
+
       res.json({ success: true, message: '상태가 변경되었습니다.' });
     });
   });
+});
+
+app.use((err, req, res, next) => {
+  if (err instanceof multer.MulterError) {
+    const message = err.code === 'LIMIT_FILE_SIZE'
+      ? '이미지 파일은 10MB 이하만 업로드할 수 있습니다.'
+      : '이미지 업로드 중 오류가 발생했습니다.';
+    return res.status(400).json({ error: message });
+  }
+
+  if (err?.message === '이미지 파일만 업로드할 수 있습니다.') {
+    return res.status(400).json({ error: err.message });
+  }
+
+  return next(err);
 });
 
 app.listen(PORT, () => {
