@@ -168,6 +168,17 @@ function parseInteger(value) {
   return Number.isNaN(parsed) ? null : parsed;
 }
 
+function toNullableText(value) {
+  if (isBlank(value)) return null;
+  return String(value).trim();
+}
+
+function toColumnText(value, maxLength) {
+  const text = toNullableText(value);
+  if (!text) return null;
+  return text.slice(0, maxLength);
+}
+
 // DB JSON 문자열을 객체로 안전하게 변환
 function safeJsonParse(value) {
   if (!value) return null;
@@ -296,6 +307,13 @@ function formatReportRow(row) {
     image_mime_type: row.image_mime_type,
     image_size: row.image_size,
     images,
+    location: row.location,
+    address: row.address,
+    space_type: row.space_type,
+    defect_area: row.defect_area,
+    user_description: row.user_description,
+    urgency: row.urgency,
+    contact_phone: row.contact_phone,
     status: row.status,
     received_at: row.received_at,
     processed_at: row.processed_at,
@@ -436,7 +454,25 @@ app.post('/api/register-report', authenticateToken, upload.array('images', 10), 
     analysis_result,
     analysis_text,
     structured_analysis,
+    location,
+    address,
+    space_type,
+    defect_area,
+    user_description,
+    urgency,
+    contact_phone,
   } = req.body;
+
+  const missingComplaintFields = validateRequiredFields({
+    location,
+    defect_area,
+    user_description,
+    contact_phone
+  });
+
+  if (missingComplaintFields.length > 0) {
+    return res.status(400).json({ error: '현장 위치, 하자 발생 부위, 사용자 설명, 연락처를 입력해 주세요.' });
+  }
 
   const imageFiles = req.files || [];
   if (imageFiles.length === 0) {
@@ -467,6 +503,7 @@ app.post('/api/register-report', authenticateToken, upload.array('images', 10), 
   try {
     storedImages = await Promise.all(imageFiles.map((file) => processReportImage(file)));
     const primaryImage = storedImages[0];
+    const defectType = toColumnText(normalizedStructured.defectContent, 255) || '미분류';
 
     const query = `
       INSERT INTO reports (
@@ -482,13 +519,20 @@ app.post('/api/register-report', authenticateToken, upload.array('images', 10), 
         image_path,
         image_mime_type,
         image_size,
+        location,
+        address,
+        space_type,
+        defect_area,
+        user_description,
+        urgency,
+        contact_phone,
         status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
 
     const params = [
       reportUserId,
-      normalizedStructured.defectContent,
+      defectType,
       normalizedStructured.severityScore,
       null,
       null,
@@ -499,6 +543,13 @@ app.post('/api/register-report', authenticateToken, upload.array('images', 10), 
       primaryImage.imagePath,
       primaryImage.mimeType,
       primaryImage.size,
+      toColumnText(location, 255),
+      toColumnText(address, 500),
+      toColumnText(space_type, 100),
+      toColumnText(defect_area, 255),
+      toNullableText(user_description),
+      toColumnText(urgency, 50) || '보통',
+      toColumnText(contact_phone, 50),
       REPORT_STATUS.RECEIVED
     ];
 
@@ -583,6 +634,13 @@ app.get('/api/my-reports/:user_id', authenticateToken, requireSelfOrAdmin, (req,
       image_path,
       image_mime_type,
       image_size,
+      location,
+      address,
+      space_type,
+      defect_area,
+      user_description,
+      urgency,
+      contact_phone,
       (
         SELECT JSON_ARRAYAGG(
           JSON_OBJECT(
@@ -636,6 +694,13 @@ app.get('/api/admin/all-reports', authenticateToken, requireAdmin, (req, res) =>
       r.image_path,
       r.image_mime_type,
       r.image_size,
+      r.location,
+      r.address,
+      r.space_type,
+      r.defect_area,
+      r.user_description,
+      r.urgency,
+      r.contact_phone,
       (
         SELECT JSON_ARRAYAGG(
           JSON_OBJECT(
@@ -669,6 +734,72 @@ app.get('/api/admin/all-reports', authenticateToken, requireAdmin, (req, res) =>
     }
 
     res.json(results.map(formatReportRow));
+  });
+});
+
+// [기능] 민원 삭제 API
+// 사용자는 본인이 접수한 민원만 삭제할 수 있고, 관리자는 전체 민원을 삭제할 수 있다.
+app.delete('/api/reports/:id', authenticateToken, (req, res) => {
+  const reportId = Number(req.params.id);
+
+  if (!Number.isInteger(reportId)) {
+    return res.status(400).json({ error: '유효한 민원 번호가 필요합니다.' });
+  }
+
+  const selectQuery = `
+    SELECT
+      r.id,
+      r.user_id,
+      r.image_path,
+      (
+        SELECT JSON_ARRAYAGG(
+          JSON_OBJECT('image_path', ri.image_path)
+        )
+        FROM report_images ri
+        WHERE ri.report_id = r.id
+      ) AS images_json
+    FROM reports r
+    WHERE r.id = ?
+    LIMIT 1
+  `;
+
+  db.execute(selectQuery, [reportId], (selectErr, rows) => {
+    if (selectErr) {
+      return res.status(500).json({ error: '민원 조회 실패', detail: selectErr.message });
+    }
+
+    if (rows.length === 0) {
+      return res.status(404).json({ error: '삭제할 민원을 찾을 수 없습니다.' });
+    }
+
+    const report = rows[0];
+    if (req.user.role !== 'admin' && req.user.id !== report.user_id) {
+      return res.status(403).json({ error: '본인이 접수한 민원만 삭제할 수 있습니다.' });
+    }
+
+    const images = safeJsonParse(report.images_json);
+    const imagePaths = Array.isArray(images)
+      ? images.map((image) => image.image_path).filter(Boolean)
+      : [];
+
+    if (report.image_path) {
+      imagePaths.push(report.image_path);
+    }
+
+    db.execute('DELETE FROM reports WHERE id = ?', [reportId], (deleteErr) => {
+      if (deleteErr) {
+        return res.status(500).json({ error: '민원 삭제 실패', detail: deleteErr.message });
+      }
+
+      [...new Set(imagePaths)].forEach((imagePath) => {
+        const resolvedPath = path.resolve(__dirname, imagePath);
+        if (resolvedPath.startsWith(REPORT_UPLOAD_DIR)) {
+          fs.promises.unlink(resolvedPath).catch(() => {});
+        }
+      });
+
+      return res.json({ success: true, message: '민원이 삭제되었습니다.' });
+    });
   });
 });
 

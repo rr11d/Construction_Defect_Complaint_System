@@ -69,9 +69,19 @@ async function main() {
       .filter((line) => !line.trim().startsWith('CREATE INDEX '))
       .join('\n');
     await connection.query(schemaWithoutIndexes);
+    await connection.query(
+      `ALTER TABLE \`${dbName}\`.reports MODIFY COLUMN defect_type VARCHAR(255) NOT NULL`
+    );
     await ensureColumn(connection, dbName, 'reports', 'image_path', 'VARCHAR(500) NULL AFTER `image_url`');
     await ensureColumn(connection, dbName, 'reports', 'image_mime_type', 'VARCHAR(100) NULL AFTER `image_path`');
     await ensureColumn(connection, dbName, 'reports', 'image_size', 'INT NULL AFTER `image_mime_type`');
+    await ensureColumn(connection, dbName, 'reports', 'location', 'VARCHAR(255) NULL AFTER `image_size`');
+    await ensureColumn(connection, dbName, 'reports', 'address', 'VARCHAR(500) NULL AFTER `location`');
+    await ensureColumn(connection, dbName, 'reports', 'space_type', 'VARCHAR(100) NULL AFTER `address`');
+    await ensureColumn(connection, dbName, 'reports', 'defect_area', 'VARCHAR(255) NULL AFTER `space_type`');
+    await ensureColumn(connection, dbName, 'reports', 'user_description', 'TEXT NULL AFTER `defect_area`');
+    await ensureColumn(connection, dbName, 'reports', 'urgency', 'VARCHAR(50) NULL DEFAULT \'보통\' AFTER `user_description`');
+    await ensureColumn(connection, dbName, 'reports', 'contact_phone', 'VARCHAR(50) NULL AFTER `urgency`');
     await ensureIndex(connection, dbName, 'reports', 'idx_reports_user_id', 'user_id');
     await ensureIndex(connection, dbName, 'reports', 'idx_reports_status', 'status');
     await ensureIndex(connection, dbName, 'reports', 'idx_reports_defect_type', 'defect_type');

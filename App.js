@@ -6,8 +6,43 @@ import UserDashboard from './src/components/UserDashboard.jsx';
 import Toast from './src/components/Toast.jsx';
 import { getStatusLabel } from './src/utils/status.js';
 
+const INITIAL_COMPLAINT_INFO = {
+  location: '',
+  address: '',
+  space_type: '',
+  defect_area: '',
+  urgency: '보통',
+  contact_phone: ''
+};
+
 function makeToast(message, type = 'info') {
   return { id: Date.now(), message, type };
+}
+
+function buildAnalysisText(analysis) {
+  const relatedLaws = Array.isArray(analysis.relatedLaws)
+    ? analysis.relatedLaws.join(', ')
+    : analysis.relatedLaws || '정보 없음';
+
+  return [
+    `하자 내용: ${analysis.defectContent || '미분류'}`,
+    `심각도: ${analysis.severityScore ?? '미정'}`,
+    `예상 해결 방법: ${analysis.expectedSolution || '정보 없음'}`,
+    `처리 방법: ${analysis.processingMethod || '정보 없음'}`,
+    `관련 법규: ${relatedLaws}`
+  ].join('\n');
+}
+
+function normalizeAnalysisResult(result = {}) {
+  return {
+    defectContent: result.defectContent || '',
+    severityScore: Number(result.severityScore) || 1,
+    expectedSolution: result.expectedSolution || '',
+    processingMethod: result.processingMethod || '',
+    relatedLaws: Array.isArray(result.relatedLaws)
+      ? result.relatedLaws.join(', ')
+      : result.relatedLaws || ''
+  };
 }
 
 function ConstructionChatbot() {
@@ -25,6 +60,10 @@ function ConstructionChatbot() {
   const [reports, setReports] = useState([]);
   const [allReports, setAllReports] = useState([]);
   const [toast, setToast] = useState(null);
+  const [complaintStep, setComplaintStep] = useState('upload');
+  const [analysisResult, setAnalysisResult] = useState(null);
+  const [editedAnalysis, setEditedAnalysis] = useState(null);
+  const [complaintInfo, setComplaintInfo] = useState(INITIAL_COMPLAINT_INFO);
 
   const showToast = (message, type = 'info') => {
     setToast(makeToast(message, type));
@@ -33,6 +72,8 @@ function ConstructionChatbot() {
   const fetchMyReports = async (userId) => {
     try {
       const targetId = userId || user?.id;
+      if (!targetId) return;
+
       const res = await api.get(`/api/my-reports/${targetId}`);
       setReports(res.data);
     } catch (error) {
@@ -115,6 +156,15 @@ function ConstructionChatbot() {
     }
   };
 
+  const resetComplaintFlow = () => {
+    setComplaintStep('upload');
+    setInput('');
+    setMessages([]);
+    setAnalysisResult(null);
+    setEditedAnalysis(null);
+    setComplaintInfo(INITIAL_COMPLAINT_INFO);
+  };
+
   const clearImages = () => {
     selectedImages.forEach((image) => URL.revokeObjectURL(image.preview));
     setSelectedImages([]);
@@ -122,18 +172,22 @@ function ConstructionChatbot() {
     setImageError('');
   };
 
+  const handleStartNewReport = () => {
+    clearImages();
+    resetComplaintFlow();
+  };
+
   const handleLogout = () => {
     localStorage.clear();
     setIsLoggedIn(false);
     setUser(null);
     setRole(null);
-    setMessages([]);
     setReports([]);
     setAllReports([]);
     clearImages();
+    resetComplaintFlow();
   };
 
-  // 프론트에서는 미리보기와 AI 분석용 base64를 만들고, 저장은 최적화된 File 객체로 보낸다.
   const prepareImageFile = (file) => new Promise((resolve, reject) => {
     if (!file.type.startsWith('image/')) {
       reject(new Error('이미지 파일만 선택할 수 있습니다.'));
@@ -198,6 +252,7 @@ function ConstructionChatbot() {
         return next;
       });
       setImageStatus('ready');
+      setComplaintStep('upload');
     } catch (error) {
       setImageStatus('error');
       setImageError(error.message);
@@ -221,19 +276,27 @@ function ConstructionChatbot() {
     });
   };
 
-  const sendMessage = async () => {
-    if (!input && selectedImages.length === 0) return;
+  const handleAnalyzeReport = async () => {
+    if (selectedImages.length === 0) {
+      showToast('AI 분석을 위해 하자 사진을 먼저 선택해 주세요.', 'error');
+      return;
+    }
+
     if (imageStatus === 'processing') {
       showToast('이미지를 준비하는 중입니다. 잠시 후 다시 시도해 주세요.', 'info');
       return;
     }
 
     setLoading(true);
-    const userMessage = { role: 'user', content: input || '사진을 분석해 주세요.' };
-    const updatedMessages = [...messages, userMessage];
+    setComplaintStep('analysis');
 
+    const userMessage = {
+      role: 'user',
+      content: input || '사진 속 건설 하자를 분석해 주세요.'
+    };
+
+    const updatedMessages = [userMessage];
     setMessages(updatedMessages);
-    setInput('');
 
     try {
       const res = await api.post('/api/chat', {
@@ -241,35 +304,76 @@ function ConstructionChatbot() {
         image: selectedImages[0]?.base64
       });
 
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: 'assistant',
-          content: res.data.result,
-          structuredResult: res.data.structuredResult || null
-        }
-      ]);
+      const normalized = normalizeAnalysisResult(res.data.structuredResult || {});
+      const assistantMessage = {
+        role: 'assistant',
+        content: res.data.result || buildAnalysisText(normalized),
+        structuredResult: normalized
+      };
+
+      setMessages([...updatedMessages, assistantMessage]);
+      setAnalysisResult(assistantMessage);
+      setEditedAnalysis(normalized);
+      showToast('AI 분석이 완료되었습니다. 결과를 확인해 주세요.', 'success');
     } catch (error) {
+      setComplaintStep('upload');
       showToast(error.response?.data?.error || '분석 중 오류가 발생했습니다.', 'error');
     } finally {
       setLoading(false);
     }
   };
 
-  // 민원 접수는 multipart/form-data로 여러 이미지를 전송해 서버 저장 구조와 맞춘다.
-  const saveToDB = async (assistantMessage) => {
-    const structured = assistantMessage.structuredResult || {};
+  const updateComplaintInfo = (field, value) => {
+    setComplaintInfo((prev) => ({
+      ...prev,
+      [field]: value
+    }));
+  };
+
+  const validateComplaintInfo = () => {
+    if (!editedAnalysis) return 'AI 분석 결과를 먼저 확인해 주세요.';
+    if (!editedAnalysis.defectContent.trim()) return 'AI 분석 결과의 하자 내용이 누락되었습니다.';
+    if (!editedAnalysis.expectedSolution.trim()) return 'AI 분석 결과의 예상 해결 방법이 누락되었습니다.';
+    if (!editedAnalysis.processingMethod.trim()) return 'AI 분석 결과의 처리 방법이 누락되었습니다.';
+    if (!editedAnalysis.relatedLaws.trim()) return 'AI 분석 결과의 관련 법규가 누락되었습니다.';
+    if (editedAnalysis.severityScore < 1 || editedAnalysis.severityScore > 10) {
+      return '심각도는 1~10 사이로 입력해 주세요.';
+    }
+    if (!input.trim()) return '민원 설명을 입력해 주세요.';
+    if (!complaintInfo.location.trim()) return '현장 위치를 입력해 주세요.';
+    if (!complaintInfo.defect_area.trim()) return '하자 발생 부위를 입력해 주세요.';
+    if (!complaintInfo.contact_phone.trim()) return '연락처를 입력해 주세요.';
+    return null;
+  };
+
+  const saveToDB = async () => {
+    const validationError = validateComplaintInfo();
+    if (validationError) {
+      showToast(validationError, 'error');
+      return;
+    }
 
     if (selectedImages.length === 0) {
       showToast('민원 접수를 위해 하자 사진을 선택해 주세요.', 'error');
       return;
     }
 
+    const structured = {
+      ...editedAnalysis,
+      severityScore: Number(editedAnalysis.severityScore),
+      relatedLaws: editedAnalysis.relatedLaws
+    };
+    const finalAnalysisText = buildAnalysisText(structured);
+
     const formData = new FormData();
     formData.append('user_id', user.id);
-    formData.append('analysis_result', assistantMessage.content);
-    formData.append('analysis_text', assistantMessage.content);
+    formData.append('analysis_result', finalAnalysisText);
+    formData.append('analysis_text', finalAnalysisText);
     formData.append('structured_analysis', JSON.stringify(structured));
+    Object.entries(complaintInfo).forEach(([key, value]) => {
+      formData.append(key, value);
+    });
+    formData.append('user_description', input.trim());
     selectedImages.forEach((image) => {
       formData.append('images', image.file);
     });
@@ -277,9 +381,22 @@ function ConstructionChatbot() {
     try {
       await api.post('/api/register-report', formData);
       showToast('민원이 정상적으로 접수되었습니다.', 'success');
+      setComplaintStep('complete');
       fetchMyReports();
     } catch (error) {
-      showToast(error.response?.data?.error || '민원 접수에 실패했습니다.', 'error');
+      const serverError = error.response?.data;
+      showToast(serverError?.detail || serverError?.error || '민원 접수에 실패했습니다.', 'error');
+    }
+  };
+
+  const deleteReport = async (reportId) => {
+    try {
+      await api.delete(`/api/reports/${reportId}`);
+      showToast('민원이 삭제되었습니다.', 'success');
+      fetchMyReports();
+    } catch (error) {
+      const serverError = error.response?.data;
+      showToast(serverError?.detail || serverError?.error || '민원 삭제에 실패했습니다.', 'error');
     }
   };
 
@@ -311,7 +428,6 @@ function ConstructionChatbot() {
     <>
       <UserDashboard
         user={user}
-        messages={messages}
         reports={reports}
         loading={loading}
         selectedImages={selectedImages}
@@ -319,13 +435,20 @@ function ConstructionChatbot() {
         imageError={imageError}
         input={input}
         setInput={setInput}
+        complaintStep={complaintStep}
+        setComplaintStep={setComplaintStep}
+        analysisResult={analysisResult}
+        complaintInfo={complaintInfo}
         onLogout={handleLogout}
         onImageUpload={handleImageUpload}
         onImageDrop={handleImageFiles}
         onRemoveImage={removeImage}
         onClearImages={clearImages}
-        onSendMessage={sendMessage}
+        onAnalyzeReport={handleAnalyzeReport}
+        onComplaintInfoChange={updateComplaintInfo}
         onSaveReport={saveToDB}
+        onDeleteReport={deleteReport}
+        onStartNewReport={handleStartNewReport}
       />
       <Toast toast={toast} onClose={() => setToast(null)} />
     </>

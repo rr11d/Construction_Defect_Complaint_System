@@ -1,4 +1,4 @@
-import { getReportSummary } from '../utils/report.js';
+import { getReportSummary, getReportTitle } from '../utils/report.js';
 
 export default function AnalysisSummary({ report }) {
   const summary = getReportSummary(report);
@@ -6,7 +6,7 @@ export default function AnalysisSummary({ report }) {
   return (
     <div className="analysis-summary">
       <div className="summary-main">
-        <strong>{summary.defect}</strong>
+        <strong>{getReportTitle(report)}</strong>
         <span>심각도 {summary.severity}/10</span>
       </div>
       <div className="summary-tags">
