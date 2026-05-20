@@ -1,119 +1,37 @@
-# Construction Defect Complaint System
+# AI 건설 하자 민원 응대 및 관리 시스템
 
-React/Vite frontend, Express API server, MySQL database, and a separate AI analysis server.
+사진을 기반으로 건설 하자를 AI가 분석하고, 민원 접수부터 관리자 처리까지 이어지는 민원 관리 시스템입니다.
 
-## Quick Start With Docker
+## 사용자 기능
 
-### 1. Prerequisites
+### 민원 접수
 
-- Node.js
-- Docker Desktop
+하자 사진을 등록하고 민원 설명을 입력한 뒤, AI 분석을 통해 접수에 필요한 하자 정보를 확인합니다.
 
-### 2. Create `.env`
+![사용자 민원 접수](media/user-complaint-create.png)
 
-Copy `.env.example` to `.env`.
+### 내 민원 확인
 
-Default Docker DB values:
+사용자가 접수한 민원의 처리 상태를 확인하고, 상세 내용을 펼쳐 사진과 분석 결과를 함께 조회할 수 있습니다.
 
-```env
-DB_HOST=127.0.0.1
-DB_PORT=3306
-DB_USER=complaint_app
-DB_PASS=complaint_app_pw
-DB_NAME=construction_defect
-```
+![사용자 민원 상세](media/user-complaint-detail.png)
 
-Also fill in:
+## 관리자 기능
 
-```env
-OPENAI_API_KEY=your-openai-api-key
-SECRET_KEY=change-this-secret
-```
+### 전체 민원 관리
 
-### 3. Install packages
+관리자는 접수된 전체 민원을 목록으로 확인하고, 하자 제목과 분석 요약, 처리 상태를 한눈에 확인할 수 있습니다.
 
-```bash
-npm install
-```
+![관리자 민원 목록](media/admin-complaint-list.png)
 
-On Windows PowerShell, if `npm` is blocked, use:
+### 민원 상세 관리
 
-```powershell
-npm.cmd install
-```
+민원을 선택하면 첨부 사진, 접수 정보, 민원 정보, 연락처를 확인하고 처리 상태를 변경할 수 있습니다.
 
-### 4. Start MySQL with Docker
+![관리자 민원 상세](media/admin-complaint-detail.png)
 
-```bash
-docker compose up -d
-```
+### AI 분석 요약 확인
 
-Wait until the DB container is healthy, then initialize tables and the admin account:
+AI가 분석한 하자 내용, 심각도, 예상 해결 방법, 처리 방법, 관련 법규를 구분해서 확인할 수 있습니다.
 
-```bash
-npm run setup:db
-```
-
-Windows PowerShell alternative:
-
-```powershell
-npm.cmd run setup:db
-```
-
-Expected output:
-
-```text
-Database ready: construction_defect
-Admin account ready: test / 1111
-```
-
-### 5. Start the app
-
-Terminal 1:
-
-```bash
-npm run dev
-```
-
-Terminal 2:
-
-```bash
-node AIserver.js
-```
-
-### 6. Open the app
-
-- Frontend: http://127.0.0.1:5173
-- API server: http://127.0.0.1:3000
-- AI server: http://127.0.0.1:4000
-
-### Admin login
-
-- ID: `test`
-- Password: `1111`
-
-## Docker Commands
-
-Start DB:
-
-```bash
-docker compose up -d
-```
-
-Stop DB:
-
-```bash
-docker compose down
-```
-
-Stop DB and remove data volume:
-
-```bash
-docker compose down -v
-```
-
-## Notes
-
-- `npm run dev` starts the frontend and the main Express server.
-- `node AIserver.js` must also be running for AI image analysis features.
-- The database setup script expects the target database to already exist, which Docker handles automatically.
+![관리자 AI 분석 요약](media/admin-ai-analysis-summary.png)
