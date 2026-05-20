@@ -21,6 +21,7 @@
     "jsonwebtoken": "^9.0.2",
     "multer": "^2.1.1",
     "mysql2": "^3.15.3",
+    "onnxruntime-node": "^1.26.0",
     "openai": "^6.10.0",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",

@@ -6,6 +6,9 @@ import UserDashboard from './src/components/UserDashboard.jsx';
 import Toast from './src/components/Toast.jsx';
 import { getStatusLabel } from './src/utils/status.js';
 
+///////// AIserver 연동
+import aiApi from './src/api/AIclient.js';
+
 const INITIAL_COMPLAINT_INFO = {
   location: '',
   address: '',
@@ -46,6 +49,7 @@ function normalizeAnalysisResult(result = {}) {
 }
 
 function ConstructionChatbot() {
+
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [user, setUser] = useState(null);
   const [role, setRole] = useState(null);
@@ -298,17 +302,25 @@ function ConstructionChatbot() {
     const updatedMessages = [userMessage];
     setMessages(updatedMessages);
 
-    try {
-      const res = await api.post('/api/chat', {
-        messages: updatedMessages,
-        image: selectedImages[0]?.base64
-      });
 
-      const normalized = normalizeAnalysisResult(res.data.structuredResult || {});
+    /// 2026, 05, 18 수정 (실시간 객체를 탐색하는 YOLO의 결과값을 메세지 객체에 같이 저장하기 위함.)
+    try {
+     const fd = new FormData();
+      fd.append('image', selectedImages[0].file);
+      fd.append('message', input || '사진 속 건설 하자를 분석해 주세요.');
+      const res = await aiApi.post('/api/ai/analyze-image', fd);
+
+      const normalized = normalizeAnalysisResult(res.data.diagnosis || {});
       const assistantMessage = {
         role: 'assistant',
-        content: res.data.result || buildAnalysisText(normalized),
-        structuredResult: normalized
+        content: buildAnalysisText(normalized),
+        structuredResult: normalized,
+        yolo: res.data.yolo,
+        //////// report.js (getReportSummary) 호환을 위한 추가 ////////
+        analysis_json: normalized,
+        defect_type: normalized.defectContent,
+        severity_score: normalized.severityScore
+        //////// ////////
       };
 
       setMessages([...updatedMessages, assistantMessage]);
@@ -319,7 +331,7 @@ function ConstructionChatbot() {
       setComplaintStep('upload');
       showToast(error.response?.data?.error || '분석 중 오류가 발생했습니다.', 'error');
     } finally {
-      setLoading(false);
+      setLoading(false);                            
     }
   };
 
@@ -452,7 +464,8 @@ function ConstructionChatbot() {
       />
       <Toast toast={toast} onClose={() => setToast(null)} />
     </>
-  );
-}
-
+   );
+  }
+ 
 export default ConstructionChatbot;
+
