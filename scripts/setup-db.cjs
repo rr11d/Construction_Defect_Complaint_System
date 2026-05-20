@@ -5,6 +5,7 @@ const bcrypt = require('bcrypt');
 require('dotenv').config();
 
 const dbName = process.env.DB_NAME || 'construction_defect';
+const dbPort = Number(process.env.DB_PORT || 3306);
 const adminId = process.env.ADMIN_USERID || 'test';
 const adminPassword = process.env.ADMIN_PASSWORD || '1111';
 const adminName = process.env.ADMIN_NAME || '관리자';
@@ -52,21 +53,26 @@ async function ensureColumn(connection, dbName, tableName, columnName, definitio
 async function main() {
   const connection = await mysql.createConnection({
     host: process.env.DB_HOST || 'localhost',
+    port: dbPort,
     user: process.env.DB_USER || 'root',
     password: process.env.DB_PASS || '',
+    database: dbName,
     multipleStatements: true
   });
 
   try {
-    await connection.query(
-      `CREATE DATABASE IF NOT EXISTS \`${dbName}\` DEFAULT CHARACTER SET utf8mb4 DEFAULT COLLATE utf8mb4_unicode_ci`
-    );
-
     const schemaPath = path.join(__dirname, '..', 'schema.sql');
     const schemaSql = fs.readFileSync(schemaPath, 'utf8');
-    const schemaWithoutIndexes = schemaSql
+    const normalizedSchemaSql = schemaSql
+      .replace(/CREATE DATABASE IF NOT EXISTS[\s\S]*?;\s*/i, '')
+      .replace(/USE\s+[^\s;]+;\s*/i, '');
+
+    const schemaWithoutIndexes = normalizedSchemaSql
       .split(/\r?\n/)
-      .filter((line) => !line.trim().startsWith('CREATE INDEX '))
+      .filter((line) => {
+        const trimmed = line.trim().toUpperCase();
+        return !trimmed.startsWith('CREATE INDEX ');
+      })
       .join('\n');
     await connection.query(schemaWithoutIndexes);
     await connection.query(
@@ -109,6 +115,12 @@ async function main() {
 }
 
 main().catch((error) => {
+  if (error?.message?.includes('auth_gssapi_client')) {
+    console.error('DB setup failed: unsupported DB auth plugin (auth_gssapi_client).');
+    console.error('Use the Docker MySQL service from docker-compose.yml, or switch DB_USER to a password-based MySQL account.');
+    process.exit(1);
+  }
+
   console.error('DB setup failed:', error.message);
   process.exit(1);
 });

@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "db:up": "docker compose up -d",
+    "db:down": "docker compose down",
+    "db:reset": "docker compose down -v",
     "dev": "concurrently \"npm:server\" \"npm:client\"",
     "server": "node server.js",
     "client": "vite --host 127.0.0.1",
