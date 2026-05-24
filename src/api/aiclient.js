@@ -1,6 +1,6 @@
 import axios from 'axios';
 
-export const AI_API_BASE_URL = 'http://localhost:4000';
+export const AI_API_BASE_URL = import.meta.env.VITE_AI_API_BASE_URL || '';
 
 const aiApi = axios.create({
   baseURL: AI_API_BASE_URL,
