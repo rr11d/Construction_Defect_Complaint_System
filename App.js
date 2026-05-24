@@ -7,7 +7,7 @@ import Toast from './src/components/Toast.jsx';
 import { getStatusLabel } from './src/utils/status.js';
 
 ///////// AIserver 연동
-import aiApi from './src/api/AIclient.js';
+import aiApi from './src/api/aiclient.js';
 
 const INITIAL_COMPLAINT_INFO = {
   location: '',
