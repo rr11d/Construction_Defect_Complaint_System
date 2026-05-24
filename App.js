@@ -22,6 +22,14 @@ function makeToast(message, type = 'info') {
   return { id: Date.now(), message, type };
 }
 
+function createClientId() {
+  if (globalThis.crypto?.randomUUID) {
+    return globalThis.crypto.randomUUID();
+  }
+
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
 function buildAnalysisText(analysis) {
   const relatedLaws = Array.isArray(analysis.relatedLaws)
     ? analysis.relatedLaws.join(', ')
@@ -222,7 +230,7 @@ function ConstructionChatbot() {
           const optimizedFile = new File([blob], `${normalizedName}.jpg`, { type: 'image/jpeg' });
 
           resolve({
-            id: crypto.randomUUID(),
+            id: createClientId(),
             name: file.name,
             preview: URL.createObjectURL(optimizedFile),
             base64,
